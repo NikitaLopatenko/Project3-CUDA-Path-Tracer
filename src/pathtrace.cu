@@ -2,10 +2,15 @@
 
 #include <cstdio>
 #include <cuda.h>
+#include <cuda/std/functional>
 #include <cmath>
 #include <thrust/execution_policy.h>
 #include <thrust/random.h>
 #include <thrust/remove.h>
+#include <thrust/functional.h>
+#include <thrust/device_ptr.h>
+#include <thrust/sort.h>
+#include <thrust/iterator/zip_iterator.h>
 
 #include "sceneStructs.h"
 #include "scene.h"
@@ -82,6 +87,8 @@ static PathSegment* dev_paths = NULL;
 static ShadeableIntersection* dev_intersections = NULL;
 // TODO: static variables for device memory, any extra info you need, etc
 // ...
+static int* dev_path_flags = NULL;
+
 
 void InitDataContainer(GuiDataContainer* imGuiData)
 {
@@ -110,6 +117,7 @@ void pathtraceInit(Scene* scene)
     cudaMemset(dev_intersections, 0, pixelcount * sizeof(ShadeableIntersection));
 
     // TODO: initialize any extra device memeory you need
+    cudaMalloc(&dev_path_flags, pixelcount * sizeof(int));
 
     checkCUDAError("pathtraceInit");
 }
@@ -122,6 +130,7 @@ void pathtraceFree()
     cudaFree(dev_materials);
     cudaFree(dev_intersections);
     // TODO: clean up any extra device memory you created
+    cudaFree(dev_path_flags);
 
     checkCUDAError("pathtraceFree");
 }
@@ -146,11 +155,35 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, Path
         segment.ray.origin = cam.position;
         segment.color = glm::vec3(1.0f, 1.0f, 1.0f);
 
+
         // TODO: implement antialiasing by jittering the ray
-        segment.ray.direction = glm::normalize(cam.view
-            - cam.right * cam.pixelLength.x * ((float)x - (float)cam.resolution.x * 0.5f)
-            - cam.up * cam.pixelLength.y * ((float)y - (float)cam.resolution.y * 0.5f)
-        );
+        thrust::default_random_engine rng = makeSeededRandomEngine(iter, index, 0);
+        thrust::uniform_real_distribution<float> u01(0, 1);
+        float x_jitter = u01(rng) - 0.5f;
+        float y_jitter = u01(rng) - 0.5f;
+
+        // Propaerties of our lens
+        float focalDistance = 8.0f;
+        float lensSize = 0.15f;
+
+        glm::vec3 pinholeDirection = glm::normalize(cam.view
+            - cam.right * cam.pixelLength.x * ((float)x - (float)cam.resolution.x * 0.5f + x_jitter)
+            - cam.up * cam.pixelLength.y * ((float)y - (float)cam.resolution.y * 0.5f + y_jitter));
+
+
+        glm::vec3 pixelFocalPoint = cam.position + pinholeDirection * focalDistance;
+
+        // Polar coordinates for the lens
+        float lensRadius = sqrt(u01(rng)) * lensSize;
+        float lensTheta = u01(rng) * TWO_PI;
+
+        // Offset back to cartesian coordinates
+        glm::vec3 lensOffset = lensRadius * cos(lensTheta) * cam.right + lensRadius * sin(lensTheta) * cam.up;
+        
+        segment.ray.origin = cam.position + lensOffset;
+        segment.ray.direction = glm::normalize(pixelFocalPoint - segment.ray.origin);
+
+        
 
         segment.pixelIndex = index;
         segment.remainingBounces = traceDepth;
@@ -241,7 +274,9 @@ __global__ void shadeFakeMaterial(
     ShadeableIntersection* shadeableIntersections,
     PathSegment* pathSegments,
     Material* materials,
-    int depth)
+    int depth,
+    glm::vec3* image
+)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < num_paths)
@@ -263,6 +298,11 @@ __global__ void shadeFakeMaterial(
             glm::vec3 intersect = pathSegments[idx].ray.origin + pathSegments[idx].ray.direction * intersection.t;
             scatterRay(pathSegments[idx], intersect, intersection.surfaceNormal, material, rng);
 
+            if (pathSegments[idx].remainingBounces <= 0) {
+                image[pathSegments[idx].pixelIndex] += pathSegments[idx].color;
+                pathSegments[idx].color = glm::vec3(0.0f);
+            }
+
             // If there was no intersection, color the ray black.
             // Lots of renderers use 4 channel color, RGBA, where A = alpha, often
             // used for opacity, in which case they can indicate "no opacity".
@@ -274,6 +314,25 @@ __global__ void shadeFakeMaterial(
         }
     }
 }
+
+__global__ void markDeadPaths(int nPaths, PathSegment* paths, int* flags)
+{
+    int index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index < nPaths)
+    {
+        flags[index] = paths[index].remainingBounces <= 0 ? 1 : 0;
+    }
+}
+
+__global__ void writeMaterialIds(int nPaths, ShadeableIntersection* intersections, int* keys)
+{
+    int index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index < nPaths)
+    {
+        keys[index] = intersections[index].t > 0.0f ? intersections[index].materialId : -1; // -1 is for those that flew out of the room
+    }
+}
+
 
 // Add the current iteration's output to the overall image
 __global__ void finalGather(int nPaths, glm::vec3* image, PathSegment* iterationPaths)
@@ -367,6 +426,18 @@ void pathtrace(uchar4* pbo, int frame, int iter)
         cudaDeviceSynchronize();
         depth++;
 
+        if (guiData != NULL && guiData->materialSorting)
+        {
+            writeMaterialIds<<<numblocksPathSegmentTracing, blockSize1d>>>(num_paths, dev_intersections, dev_path_flags);
+            checkCUDAError("material ids");
+
+            auto zipped = thrust::make_zip_iterator(thrust::device_pointer_cast(dev_paths),
+                thrust::device_pointer_cast(dev_intersections));
+            
+            thrust::sort_by_key(thrust::device,thrust::device_pointer_cast(dev_path_flags),
+                thrust::device_pointer_cast(dev_path_flags) + num_paths,zipped);
+        }
+
         // TODO:
         // --- Shading Stage ---
         // Shade path segments based on intersections and generate new rays by
@@ -382,9 +453,21 @@ void pathtrace(uchar4* pbo, int frame, int iter)
             dev_intersections,
             dev_paths,
             dev_materials,
-            depth
+            depth,
+            dev_image
         );
-        iterationComplete = (depth >= traceDepth); // TODO: should be based off stream compaction results.
+
+        checkCUDAError("shade");
+
+        markDeadPaths<<<numblocksPathSegmentTracing, blockSize1d>>>(num_paths, dev_paths, dev_path_flags);
+        checkCUDAError("mark dead paths");
+
+        thrust::device_ptr<PathSegment> thrust_paths(dev_paths);
+        thrust::device_ptr<int> thrust_flags(dev_path_flags);
+        thrust::device_ptr<PathSegment> new_end = thrust::remove_if(thrust_paths, thrust_paths + num_paths, thrust_flags, cuda::std::identity{});
+        num_paths = static_cast<int>(new_end - thrust_paths);
+
+        iterationComplete = (depth >= traceDepth) || (num_paths == 0);
 
         if (guiData != NULL)
         {
