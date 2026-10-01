@@ -342,6 +342,7 @@ __global__ void shadeFakeMaterial(
     PathSegment* pathSegments,
     Material* materials,
     int depth,
+    int numberOfBounces,
     glm::vec3* image,
     Geom* geoms,
     int geoms_size,
@@ -398,6 +399,27 @@ __global__ void shadeFakeMaterial(
             }
 
             scatterRay(pathSegments[idx], intersect, intersection.surfaceNormal, material, rng);
+
+            // if we think ray might be dark, lets play russian roulette
+            if (pathSegments[idx].remainingBounces > 0 && pathSegments[idx].remainingBounces <= numberOfBounces/2)
+            {
+                thrust::uniform_real_distribution<float> u01(0, 1);
+
+                float highestColorBrightness = glm::max(pathSegments[idx].color.x, pathSegments[idx].color.y);
+                highestColorBrightness = glm::max(highestColorBrightness, pathSegments[idx].color.z);
+
+                float rouletteChances = glm::clamp(1.0f - highestColorBrightness, 0.0f, 5.0f / 6.0f); // extra fun roulette, only 1 empty chamber
+
+                if (u01(rng) < rouletteChances) // the ray was unlucky and died
+                {
+                    pathSegments[idx].remainingBounces = 0;
+                    pathSegments[idx].color = glm::vec3(0.0f);
+                }
+                else // the ray was lucky and survived
+                {
+                    pathSegments[idx].color /= (1.0f - rouletteChances); // even out the color to account for those who died
+                }
+            }
 
             if (pathSegments[idx].remainingBounces <= 0) {
                 image[pathSegments[idx].pixelIndex] += pathSegments[idx].color;
@@ -555,6 +577,7 @@ void pathtrace(uchar4* pbo, int frame, int iter)
             dev_paths,
             dev_materials,
             depth,
+            traceDepth,
             dev_image,
             dev_geoms,
             (int)hst_scene->geoms.size(),
