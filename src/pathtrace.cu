@@ -88,6 +88,8 @@ static ShadeableIntersection* dev_intersections = NULL;
 // TODO: static variables for device memory, any extra info you need, etc
 // ...
 static int* dev_path_flags = NULL;
+static Geom* dev_light_sources = NULL;
+static int light_sources_count = 0;
 
 
 void InitDataContainer(GuiDataContainer* imGuiData)
@@ -119,6 +121,18 @@ void pathtraceInit(Scene* scene)
     // TODO: initialize any extra device memeory you need
     cudaMalloc(&dev_path_flags, pixelcount * sizeof(int));
 
+    std::vector<Geom> lights;
+    for (const Geom& obj : scene->geoms) {
+        if (scene->materials[obj.materialid].emittance > 0.0f) {
+            lights.push_back(obj);
+        }
+    }
+    light_sources_count = (int)lights.size();
+    cudaMalloc(&dev_light_sources, light_sources_count * sizeof(Geom));
+    cudaMemcpy(dev_light_sources, lights.data(), light_sources_count * sizeof(Geom), cudaMemcpyHostToDevice);
+
+
+
     checkCUDAError("pathtraceInit");
 }
 
@@ -131,6 +145,7 @@ void pathtraceFree()
     cudaFree(dev_intersections);
     // TODO: clean up any extra device memory you created
     cudaFree(dev_path_flags);
+    cudaFree(dev_light_sources);
 
     checkCUDAError("pathtraceFree");
 }
@@ -164,7 +179,7 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, Path
 
         // Propaerties of our lens
         float focalDistance = 8.0f;
-        float lensSize = 0.15f;
+        float lensSize = 0.10f;
 
         glm::vec3 pinholeDirection = glm::normalize(cam.view
             - cam.right * cam.pixelLength.x * ((float)x - (float)cam.resolution.x * 0.5f + x_jitter)
@@ -259,6 +274,58 @@ __global__ void computeIntersections(
     }
 }
 
+__device__ bool somethingOnTheWay( 
+    glm::vec3 from,
+    glm::vec3 to,
+    Geom* geoms,
+    int geoms_size)
+{
+    glm::vec3 direction = glm::normalize(to - from);
+    float distance = length(to - from);
+
+    Ray ray;
+    ray.origin = from + direction * 0.001f;
+    ray.direction = direction;
+
+    float t;
+    float t_min = distance - 0.001f;
+    bool outside = true;
+
+    glm::vec3 tmp_intersect;
+    glm::vec3 tmp_normal;
+
+    bool hit = false;
+
+    for (int i = 0; i < geoms_size; i++)
+    {
+        Geom& geom = geoms[i];
+
+        if (geom.type == CUBE)
+        {
+            t = boxIntersectionTest(geom, ray, tmp_intersect, tmp_normal, outside);
+        }
+        else if (geom.type == SPHERE)
+        {
+            t = sphereIntersectionTest(geom, ray, tmp_intersect, tmp_normal, outside);
+        }
+        else{
+            continue;
+        }
+        
+
+        // like in computeIntersections but simplier for true/false indication
+        if (t > 0.0f && t_min > t)
+        {
+            hit = true;
+            break;
+        }
+    }
+
+    return hit;
+
+
+}
+
 // LOOK: "fake" shader demonstrating what you might do with the info in
 // a ShadeableIntersection, as well as how to use thrust's random number
 // generator. Observe that since the thrust random number generator basically
@@ -275,7 +342,11 @@ __global__ void shadeFakeMaterial(
     PathSegment* pathSegments,
     Material* materials,
     int depth,
-    glm::vec3* image
+    glm::vec3* image,
+    Geom* geoms,
+    int geoms_size,
+    Geom* light_sources,
+    int light_sources_count
 )
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -296,6 +367,36 @@ __global__ void shadeFakeMaterial(
             Material material = materials[intersection.materialId];
 
             glm::vec3 intersect = pathSegments[idx].ray.origin + pathSegments[idx].ray.direction * intersection.t;
+
+            if (material.emittance <= 0.0f && material.hasRefractive <= 0.0f && light_sources_count > 0)
+            {
+                thrust::uniform_real_distribution<float> u01(0, 1);
+
+                int lightID = (int)(u01(rng) * light_sources_count);
+                if (lightID >= light_sources_count) lightID = light_sources_count - 1; // if (very unlikely) u01 will spit out 1
+
+
+
+                Geom light_source = light_sources[lightID];
+                Material light_source_material = materials[light_source.materialid];
+
+                glm::vec3 local(u01(rng) - 0.5f, -0.5f, u01(rng) - 0.5f); // a point on light where x and z are random and y is bottom
+                glm::vec3 pointOnSource = glm::vec3(light_source.transform * glm::vec4(local, 1.0f)); // cooridinates in the room
+
+
+                glm::vec3 lightVector = pointOnSource - intersect;
+                float dist = glm::length(lightVector);
+                glm::vec3 lightDirection = lightVector / dist;
+                
+                float cosLighting = glm::dot(intersection.surfaceNormal, lightDirection);
+                if (cosLighting > 0.0f && !somethingOnTheWay(intersect, pointOnSource, geoms, geoms_size))
+                {
+                    float totalLight = light_source.scale.x * light_source.scale.z; // area of one face
+                    glm::vec3 directLightEffect = pathSegments[idx].color * material.color * light_source_material.color * light_source_material.emittance * cosLighting * totalLight / (dist * dist);
+                    image[pathSegments[idx].pixelIndex] += directLightEffect;
+                }
+            }
+
             scatterRay(pathSegments[idx], intersect, intersection.surfaceNormal, material, rng);
 
             if (pathSegments[idx].remainingBounces <= 0) {
@@ -454,7 +555,11 @@ void pathtrace(uchar4* pbo, int frame, int iter)
             dev_paths,
             dev_materials,
             depth,
-            dev_image
+            dev_image,
+            dev_geoms,
+            (int)hst_scene->geoms.size(),
+            dev_light_sources,
+            light_sources_count
         );
 
         checkCUDAError("shade");
