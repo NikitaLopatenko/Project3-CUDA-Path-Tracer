@@ -48,10 +48,11 @@ void checkCUDAErrorFn(const char* msg, const char* file, int line)
 }
 
 __host__ __device__
-thrust::default_random_engine makeSeededRandomEngine(int iter, int index, int depth)
+unsigned long long makeSeededRandomEngine(int iter, int index, int depth)
 {
-    int h = utilhash((1 << 31) | (depth << 22) | iter) ^ utilhash(index);
-    return thrust::default_random_engine(h);
+    unsigned long long state = utilhash((1 << 31) | (depth << 22) | iter) ^ utilhash(index);
+    if (state == 0) state = 1;
+    return state;
 }
 
 //Kernel that writes the image to the OpenGL PBO directly.
@@ -172,10 +173,9 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, Path
 
 
         // TODO: implement antialiasing by jittering the ray
-        thrust::default_random_engine rng = makeSeededRandomEngine(iter, index, 0);
-        thrust::uniform_real_distribution<float> u01(0, 1);
-        float x_jitter = u01(rng) - 0.5f;
-        float y_jitter = u01(rng) - 0.5f;
+        unsigned long long rng = makeSeededRandomEngine(iter, index, 0);
+        float x_jitter = betterRandom01(rng) - 0.5f;
+        float y_jitter = betterRandom01(rng) - 0.5f;
 
         // Propaerties of our lens
         float focalDistance = 8.0f;
@@ -189,8 +189,8 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, Path
         glm::vec3 pixelFocalPoint = cam.position + pinholeDirection * focalDistance;
 
         // Polar coordinates for the lens
-        float lensRadius = sqrt(u01(rng)) * lensSize;
-        float lensTheta = u01(rng) * TWO_PI;
+        float lensRadius = sqrt(betterRandom01(rng)) * lensSize;
+        float lensTheta = betterRandom01(rng) * TWO_PI;
 
         // Offset back to cartesian coordinates
         glm::vec3 lensOffset = lensRadius * cos(lensTheta) * cam.right + lensRadius * sin(lensTheta) * cam.up;
@@ -363,7 +363,7 @@ __global__ void shadeFakeMaterial(
           // Set up the RNG
           // LOOK: this is how you use thrust's RNG! Please look at
           // makeSeededRandomEngine as well.
-            thrust::default_random_engine rng = makeSeededRandomEngine(iter, idx, depth);
+            unsigned long long rng = makeSeededRandomEngine(iter, idx, depth);
 
             Material material = materials[intersection.materialId];
 
@@ -371,17 +371,15 @@ __global__ void shadeFakeMaterial(
 
             if (material.emittance <= 0.0f && material.hasRefractive <= 0.0f && light_sources_count > 0)
             {
-                thrust::uniform_real_distribution<float> u01(0, 1);
-
-                int lightID = (int)(u01(rng) * light_sources_count);
-                if (lightID >= light_sources_count) lightID = light_sources_count - 1; // if (very unlikely) u01 will spit out 1
+                int lightID = (int)(betterRandom01(rng) * light_sources_count);
+                if (lightID >= light_sources_count) lightID = light_sources_count - 1; // if (very unlikely) betterRandom01 will spit out 1
 
 
 
                 Geom light_source = light_sources[lightID];
                 Material light_source_material = materials[light_source.materialid];
 
-                glm::vec3 local(u01(rng) - 0.5f, -0.5f, u01(rng) - 0.5f); // a point on light where x and z are random and y is bottom
+                glm::vec3 local(betterRandom01(rng) - 0.5f, -0.5f, betterRandom01(rng) - 0.5f); // a point on light where x and z are random and y is bottom
                 glm::vec3 pointOnSource = glm::vec3(light_source.transform * glm::vec4(local, 1.0f)); // cooridinates in the room
 
 
@@ -403,14 +401,13 @@ __global__ void shadeFakeMaterial(
             // if we think ray might be dark, lets play russian roulette
             if (pathSegments[idx].remainingBounces > 0 && pathSegments[idx].remainingBounces <= numberOfBounces/2)
             {
-                thrust::uniform_real_distribution<float> u01(0, 1);
 
                 float highestColorBrightness = glm::max(pathSegments[idx].color.x, pathSegments[idx].color.y);
                 highestColorBrightness = glm::max(highestColorBrightness, pathSegments[idx].color.z);
 
                 float rouletteChances = glm::clamp(1.0f - highestColorBrightness, 0.0f, 5.0f / 6.0f); // extra fun roulette, only 1 empty chamber
 
-                if (u01(rng) < rouletteChances) // the ray was unlucky and died
+                if (betterRandom01(rng) < rouletteChances) // the ray was unlucky and died
                 {
                     pathSegments[idx].remainingBounces = 0;
                     pathSegments[idx].color = glm::vec3(0.0f);
