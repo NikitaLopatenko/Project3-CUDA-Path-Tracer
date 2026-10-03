@@ -151,6 +151,135 @@ void pathtraceFree()
     checkCUDAError("pathtraceFree");
 }
 
+
+
+/**
+* Here I added my personal extra credit and all of the helper methods needed for it that was approved in Ed discussions.
+*
+* It is a mirage effect when a ray passes through material with variable index of refraction
+* Good example of that is a hot air. Its IOR is affected by temperature, so the hotter the air, the bigger the difference.
+*
+* I think it is interesting and prettty cool physical effect and it is especially nice
+* when sometimes in the modern games I also see this effect present. To me it means they really pay close attention to details.
+* This is a pretty simple version and I am sure BigTech companies have much better logic for this, but here is my implementation.
+* Hope you enjoy :)
+*/
+
+
+
+// our hot air box structure
+struct HotAirBox
+{
+    glm::vec3 bmin;
+    glm::vec3 bmax;
+    float bottomTemperatureC;
+    float topTemperatureC;
+    float visualStrength; // 1 = "how it is in real world" and >1 is for bigger effect
+};
+
+
+// checking if position of the ray is insede hot air box (do we even need to bend it)
+__device__ bool insideHotAir(glm::vec3 pos, HotAirBox box)
+{
+    return pos.x >= box.bmin.x && pos.x <= box.bmax.x
+        && pos.y >= box.bmin.y && pos.y <= box.bmax.y
+        && pos.z >= box.bmin.z && pos.z <= box.bmax.z;
+}
+
+// finding index of refraction at a specific pos since it is a distribution (from super hot at the bottom of the box to room temperature at the top)
+__device__ float hotAirIOR(glm::vec3 pos, HotAirBox box)
+{
+    float heightRatio  = (pos.y - box.bmin.y) / (box.bmax.y - box.bmin.y + 1e-5f); // try to find ratio in terms of height
+    heightRatio = glm::clamp(heightRatio, 0.0f, 1.0f);
+
+    float temperatureC = box.bottomTemperatureC * (1.0f - heightRatio) + box.topTemperatureC * heightRatio; // temperature at our position
+    float temperatureK = temperatureC + 273.15f; // physical formula uses Kelvin
+
+    return 1.0f + (0.000293f * 273.15f) / temperatureK; // 0.000293 is the physical constant for air
+}
+
+__device__ void marchBendRay(Ray& ray, HotAirBox box)
+{
+    const float stepSize = 0.12f; // distance we travel in each step, not something physics-related
+    const int maxSteps = 48;
+
+    glm::vec3 pos = ray.origin;
+    glm::vec3 dir = glm::normalize(ray.direction);
+
+    // if we start outside, step forward a bit until we hit the box or give up
+    if (!insideHotAir(pos, box)) {
+        for (int i = 0; i < 64; i++) {
+            pos += dir * stepSize;
+            if (insideHotAir(pos, box)) break;
+        }
+        if (!insideHotAir(pos, box)) return;
+    }
+
+    const float gradientStep = 0.05f; // interval to estimate IOR, not physics-related eitherr
+    for (int i = 0; i < maxSteps; i++)
+    {
+        if (!insideHotAir(pos, box)) break;
+
+
+        float yBelow = glm::max(pos.y - gradientStep, box.bmin.y);
+        float yAbove = glm::min(pos.y + gradientStep, box.bmax.y);
+
+
+        // Central Difference Scheme (this is very common in numerical analysis if you are familiar with it)
+        float n0 = hotAirIOR(pos, box);
+        float nBelow = hotAirIOR(glm::vec3(pos.x, yBelow, pos.z), box);
+        float nAbove = hotAirIOR(glm::vec3(pos.x, yAbove, pos.z), box);
+        
+
+        float gradientDistance = yAbove - yBelow;
+        if (gradientDistance <= 1e-6f) break; // make sure we dont divide by zero
+
+        glm::vec3 grad(0.0f, (nAbove - nBelow) / gradientDistance, 0.0f);
+
+
+        glm::vec3 turn = grad - dir * glm::dot(dir, grad); // this is sort of an adaptation of Snells law but for continuous media
+        dir = glm::normalize(dir + box.visualStrength * stepSize * turn / n0);
+
+        glm::vec3 nextPos = pos + dir * stepSize;
+        if (!insideHotAir(nextPos, box)) break; // if we are out of the box, leave the loop
+        pos = nextPos;
+    }
+
+    ray.origin = pos;
+    ray.direction = dir;
+}
+
+__global__ void applyHotAirMarch(int num_paths, PathSegment* pathSegments)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_paths) return;
+    if (pathSegments[idx].remainingBounces <= 0) return;
+
+    // Slab just above the floor, you can play around with parameters to place it somewhere else
+    HotAirBox box;
+    box.bmin = glm::vec3(-4.5f, 0.05f, -4.5f);
+    box.bmax = glm::vec3(4.5f, 1.8f, 4.5f);
+    box.bottomTemperatureC = 800.0f;
+    box.topTemperatureC = 20.0f;
+    box.visualStrength = 200.0f; // to see some real effect put around 200
+                                 // keep in mind that irl distances are much larger, so here we need to scale up a lot
+    
+    marchBendRay(pathSegments[idx].ray, box);
+}
+
+
+
+
+
+/**
+* End of my personal extra credit :) 
+*/
+
+
+
+
+
+
 /**
 * Generate PathSegments with rays from the camera through the screen into the
 * scene, which is the first bounce of rays.
@@ -534,6 +663,14 @@ void pathtrace(uchar4* pbo, int frame, int iter)
 
         // tracing
         dim3 numblocksPathSegmentTracing = (num_paths + blockSize1d - 1) / blockSize1d;
+
+        // my hot air feature
+        applyHotAirMarch<<<numblocksPathSegmentTracing, blockSize1d>>>(
+            num_paths,
+            dev_paths
+        );
+        checkCUDAError("hot air march");
+
         computeIntersections<<<numblocksPathSegmentTracing, blockSize1d>>> (
             depth,
             num_paths,
