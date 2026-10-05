@@ -153,6 +153,9 @@ void pathtraceFree()
 
 
 
+
+
+
 /**
 * Here I added my personal extra credit and all of the helper methods needed for it that was approved in Ed discussions.
 *
@@ -164,7 +167,6 @@ void pathtraceFree()
 * This is a pretty simple version and I am sure BigTech companies have much better logic for this, but here is my implementation.
 * Hope you enjoy :)
 */
-
 
 
 // our hot air box structure
@@ -261,14 +263,11 @@ __global__ void applyHotAirMarch(int num_paths, PathSegment* pathSegments)
     box.bmax = glm::vec3(4.5f, 1.8f, 4.5f);
     box.bottomTemperatureC = 800.0f;
     box.topTemperatureC = 20.0f;
-    box.visualStrength = 200.0f; // to see some real effect put around 200
+    box.visualStrength = 0.0f; // to see some real effect put around 200
                                  // keep in mind that irl distances are much larger, so here we need to scale up a lot
     
     marchBendRay(pathSegments[idx].ray, box);
 }
-
-
-
 
 
 /**
@@ -308,7 +307,7 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, Path
 
         // Propaerties of our lens
         float focalDistance = 8.0f;
-        float lensSize = 0.10f;
+        float lensSize = 0.0f;
 
         glm::vec3 pinholeDirection = glm::normalize(cam.view
             - cam.right * cam.pixelLength.x * ((float)x - (float)cam.resolution.x * 0.5f + x_jitter)
@@ -407,7 +406,8 @@ __device__ bool somethingOnTheWay(
     glm::vec3 from,
     glm::vec3 to,
     Geom* geoms,
-    int geoms_size)
+    int geoms_size,
+    Material* materials)
 {
     glm::vec3 direction = glm::normalize(to - from);
     float distance = length(to - from);
@@ -445,6 +445,7 @@ __device__ bool somethingOnTheWay(
         // like in computeIntersections but simplier for true/false indication
         if (t > 0.0f && t_min > t)
         {
+            if (materials[geom.materialid].emittance > 0.0f) continue;
             hit = true;
             break;
         }
@@ -498,54 +499,62 @@ __global__ void shadeFakeMaterial(
 
             glm::vec3 intersect = pathSegments[idx].ray.origin + pathSegments[idx].ray.direction * intersection.t;
 
-            if (material.emittance <= 0.0f && material.hasRefractive <= 0.0f && light_sources_count > 0)
-            {
-                int lightID = (int)(betterRandom01(rng) * light_sources_count);
-                if (lightID >= light_sources_count) lightID = light_sources_count - 1; // if (very unlikely) betterRandom01 will spit out 1
 
-
-
-                Geom light_source = light_sources[lightID];
-                Material light_source_material = materials[light_source.materialid];
-
-                glm::vec3 local(betterRandom01(rng) - 0.5f, -0.5f, betterRandom01(rng) - 0.5f); // a point on light where x and z are random and y is bottom
-                glm::vec3 pointOnSource = glm::vec3(light_source.transform * glm::vec4(local, 1.0f)); // cooridinates in the room
-
-
-                glm::vec3 lightVector = pointOnSource - intersect;
-                float dist = glm::length(lightVector);
-                glm::vec3 lightDirection = lightVector / dist;
-                
-                float cosLighting = glm::dot(intersection.surfaceNormal, lightDirection);
-                if (cosLighting > 0.0f && !somethingOnTheWay(intersect, pointOnSource, geoms, geoms_size))
+            #if 1
+                if (material.emittance <= 0.0f && material.hasRefractive <= 0.0f && light_sources_count > 0)
                 {
-                    float totalLight = light_source.scale.x * light_source.scale.z; // area of one face
-                    glm::vec3 directLightEffect = pathSegments[idx].color * material.color * light_source_material.color * light_source_material.emittance * cosLighting * totalLight / (dist * dist);
-                    image[pathSegments[idx].pixelIndex] += directLightEffect;
+                    int lightID = (int)(betterRandom01(rng) * light_sources_count);
+                    if (lightID >= light_sources_count) lightID = light_sources_count - 1; // if (very unlikely) betterRandom01 will spit out 1
+
+
+
+                    Geom light_source = light_sources[lightID];
+                    Material light_source_material = materials[light_source.materialid];
+
+                    glm::vec3 local(betterRandom01(rng) - 0.5f, -0.5f, betterRandom01(rng) - 0.5f); // a point on light where x and z are random and y is bottom
+                    glm::vec3 pointOnSource = glm::vec3(light_source.transform * glm::vec4(local, 1.0f)); // cooridinates in the room
+
+
+                    glm::vec3 lightVector = pointOnSource - intersect;
+                    float dist = glm::length(lightVector);
+                    glm::vec3 lightDirection = lightVector / dist;
+                    
+                    float cosLighting = glm::dot(intersection.surfaceNormal, lightDirection);
+                    if (cosLighting > 0.0f && !somethingOnTheWay(intersect, pointOnSource, geoms, geoms_size, materials))
+                    {
+                        float totalLight = light_source.scale.x * light_source.scale.z; // area of one face
+                        glm::vec3 directLightEffect = pathSegments[idx].color * material.color * light_source_material.color * light_source_material.emittance * cosLighting * totalLight / (dist * dist);
+                        image[pathSegments[idx].pixelIndex] += directLightEffect / 3.1415f;
+                    }
+
+                
                 }
-            }
+            #endif
 
             scatterRay(pathSegments[idx], intersect, intersection.surfaceNormal, material, rng);
 
-            // if we think ray might be dark, lets play russian roulette
-            if (pathSegments[idx].remainingBounces > 0 && pathSegments[idx].remainingBounces <= numberOfBounces/2)
-            {
-
-                float highestColorBrightness = glm::max(pathSegments[idx].color.x, pathSegments[idx].color.y);
-                highestColorBrightness = glm::max(highestColorBrightness, pathSegments[idx].color.z);
-
-                float rouletteChances = glm::clamp(1.0f - highestColorBrightness, 0.0f, 5.0f / 6.0f); // extra fun roulette, only 1 empty chamber
-
-                if (betterRandom01(rng) < rouletteChances) // the ray was unlucky and died
+            #if 1
+                // if we think ray might be dark, lets play russian roulette
+                if (pathSegments[idx].remainingBounces > 0 && pathSegments[idx].remainingBounces <= numberOfBounces/2)
                 {
-                    pathSegments[idx].remainingBounces = 0;
-                    pathSegments[idx].color = glm::vec3(0.0f);
+
+                    float highestColorBrightness = glm::max(pathSegments[idx].color.x, pathSegments[idx].color.y);
+                    highestColorBrightness = glm::max(highestColorBrightness, pathSegments[idx].color.z);
+
+                    float rouletteChances = glm::clamp(1.0f - highestColorBrightness, 0.0f, 5.0f / 6.0f); // extra fun roulette, only 1 empty chamber
+
+                    if (betterRandom01(rng) < rouletteChances) // the ray was unlucky and died
+                    {
+                        pathSegments[idx].remainingBounces = 0;
+                        pathSegments[idx].color = glm::vec3(0.0f);
+                    }
+                    else // the ray was lucky and survived
+                    {
+                        pathSegments[idx].color /= (1.0f - rouletteChances); // even out the color to account for those who died
+                    }
                 }
-                else // the ray was lucky and survived
-                {
-                    pathSegments[idx].color /= (1.0f - rouletteChances); // even out the color to account for those who died
-                }
-            }
+            #endif
+
 
             if (pathSegments[idx].remainingBounces <= 0) {
                 image[pathSegments[idx].pixelIndex] += pathSegments[idx].color;
@@ -727,6 +736,7 @@ void pathtrace(uchar4* pbo, int frame, int iter)
         thrust::device_ptr<PathSegment> thrust_paths(dev_paths);
         thrust::device_ptr<int> thrust_flags(dev_path_flags);
         thrust::device_ptr<PathSegment> new_end = thrust::remove_if(thrust_paths, thrust_paths + num_paths, thrust_flags, cuda::std::identity{});
+        
         num_paths = static_cast<int>(new_end - thrust_paths);
 
         iterationComplete = (depth >= traceDepth) || (num_paths == 0);

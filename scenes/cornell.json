@@ -22,26 +22,10 @@
             "TYPE":"Diffuse",
             "RGB":[0.35, 0.85, 0.35]
         },
-        "diffuse_blue":
-        {
-            "TYPE":"Diffuse",
-            "RGB":[0.15, 0.35, 0.95]
-        },
-        "diffuse_brown":
-        {
-            "TYPE":"Diffuse",
-            "RGB":[0.45, 0.20, 0.08]
-        },
         "diffuse_yellow":
         {
             "TYPE":"Diffuse",
             "RGB":[1.0, 0.8, 0.15]
-        },
-        "specular_white":
-        {
-            "TYPE":"Specular",
-            "RGB":[0.98, 0.98, 0.98],
-            "ROUGHNESS":0.0
         },
         "glass":
         {
@@ -106,46 +90,18 @@
             "SCALE":[0.01,10.0,10.0]
         },
         {
+            "TYPE":"cube",
+            "MATERIAL":"diffuse_yellow",
+            "TRANS":[-0.2,4.0,-3.2],
+            "ROTAT":[0.0,15.0,0.0],
+            "SCALE":[1.8,3.5,1.2]
+        },
+        {
             "TYPE":"sphere",
             "MATERIAL":"glass",
             "TRANS":[-1.0,4.0,-1.0],
             "ROTAT":[0.0,0.0,0.0],
             "SCALE":[3.0,3.0,3.0]
-        },
-        {
-            "TYPE":"cube",
-            "MATERIAL":"diffuse_blue",
-            "TRANS":[0.0,0.45,-4.85],
-            "ROTAT":[0.0,0.0,0.0],
-            "SCALE":[9.0,0.12,0.12]
-        },
-        {
-            "TYPE":"cube",
-            "MATERIAL":"diffuse_brown",
-            "TRANS":[0.0,1.0,-4.75],
-            "ROTAT":[0.0,0.0,0.0],
-            "SCALE":[2.2,0.35,0.12]
-        },
-        {
-            "TYPE":"cube",
-            "MATERIAL":"diffuse_brown",
-            "TRANS":[1.15,1.1,-4.73],
-            "ROTAT":[0.0,0.0,-25.0],
-            "SCALE":[0.8,0.28,0.12]
-        },
-        {
-            "TYPE":"cube",
-            "MATERIAL":"diffuse_brown",
-            "TRANS":[0.0,1.9,-4.70],
-            "ROTAT":[0.0,0.0,0.0],
-            "SCALE":[0.10,1.7,0.12]
-        },
-        {
-            "TYPE":"cube",
-            "MATERIAL":"diffuse_yellow",
-            "TRANS":[0.45,2.45,-4.68],
-            "ROTAT":[0.0,0.0,-15.0],
-            "SCALE":[0.9,0.28,0.12]
         }
     ]
 }
